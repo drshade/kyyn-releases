@@ -189,7 +189,11 @@ jobs:
         run: |
           bash scripts/render-release-notes.sh /tmp/release-notes.md
           prerelease_flag=(); [[ $PRERELEASE == true ]] && prerelease_flag=(--prerelease)
-          gh release create "v$VERSION" --repo drshade/kyyn-releases --target "$RELEASE_TARGET" "${prerelease_flag[@]}" --title "$VERSION - $RELEASE_DATE" --notes-file /tmp/release-notes.md target/release-assets/*
+          if gh release view "v$VERSION" --repo drshade/kyyn-releases >/dev/null 2>&1; then
+            gh release upload "v$VERSION" --repo drshade/kyyn-releases --clobber target/release-assets/*
+          else
+            gh release create "v$VERSION" --repo drshade/kyyn-releases --target "$RELEASE_TARGET" "${prerelease_flag[@]}" --title "$VERSION - $RELEASE_DATE" --notes-file /tmp/release-notes.md target/release-assets/*
+          fi
 
   publish-homebrew:
     needs: [metadata, finalize, publish-release]
@@ -202,6 +206,7 @@ jobs:
       - env: { VERSION: "${{ needs.metadata.outputs.version }}" }
         run: |
           install -m 0644 /tmp/kyyn-release-assets/kyyn.rb Formula/kyyn.rb
+          export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
           brew style Formula/kyyn.rb
           git config user.name "kyyn release bot"; git config user.email "noreply@github.com"
           git add Formula/kyyn.rb
