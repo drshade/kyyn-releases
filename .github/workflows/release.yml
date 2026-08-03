@@ -103,6 +103,8 @@ jobs:
       - name: Verify source commit
         env: { SOURCE_COMMIT: "${{ inputs.source_commit }}" }
         run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: { repository: drshade/homebrew-kyyn, path: target/homebrew-tap, persist-credentials: false }
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with: { pattern: "release-local-*", path: target/distrib, merge-multiple: true }
       - name: Render and exercise installers
@@ -111,7 +113,8 @@ jobs:
           bash scripts/render-release-installers.sh target/distrib
           ruby -c target/distrib/kyyn.rb
           export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
-          brew style target/distrib/kyyn.rb
+          install -m 0644 target/distrib/kyyn.rb target/homebrew-tap/Formula/kyyn.rb
+          (cd target/homebrew-tap && brew style Formula/kyyn.rb)
           install_dir=$(mktemp -d)
           KYYN_DOWNLOAD_URL="file://$PWD/target/distrib" KYYN_INSTALL_DIR="$install_dir" sh target/distrib/kyyn-installer.sh
           test "$("$install_dir/kyyn" --version)" = "kyyn $VERSION"
