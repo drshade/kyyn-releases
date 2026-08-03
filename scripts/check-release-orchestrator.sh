@@ -18,6 +18,8 @@ grep -q 'contents: write' "$workflow"
 grep -q 'packages: write' "$workflow"
 grep -q 'secrets.HOMEBREW_TAP_TOKEN' "$workflow"
 grep -q 'gh release create' "$workflow"
+grep -q 'gh release upload.*--clobber' "$workflow"
+grep -q 'PATH="/home/linuxbrew/.linuxbrew/bin:' "$workflow"
 
 for target in aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do
   grep -q -- "target: $target" "$workflow"
