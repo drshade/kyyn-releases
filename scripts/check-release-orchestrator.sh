@@ -20,7 +20,10 @@ grep -q 'secrets.HOMEBREW_TAP_TOKEN' "$workflow"
 grep -q 'gh release create' "$workflow"
 grep -q 'gh release upload.*--clobber' "$workflow"
 grep -q 'PATH="/home/linuxbrew/.linuxbrew/bin:' "$workflow"
-grep -q 'brew style target/distrib/kyyn.rb' "$workflow"
+grep -q 'repository: drshade/homebrew-kyyn' "$workflow"
+grep -q 'path: target/homebrew-tap' "$workflow"
+grep -q 'install -m 0644 target/distrib/kyyn.rb target/homebrew-tap/Formula/kyyn.rb' "$workflow"
+grep -q 'cd target/homebrew-tap && brew style Formula/kyyn.rb' "$workflow"
 
 for target in aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do
   grep -q -- "target: $target" "$workflow"
