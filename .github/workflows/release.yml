@@ -1,0 +1,223 @@
+name: Publish Kyyn release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Reviewed private-source tag (for example v1.0.0-rc.2)
+        required: true
+        type: string
+      source_commit:
+        description: Full private-source commit OID that the tag must resolve to
+        required: true
+        type: string
+
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      release-date: ${{ steps.release.outputs.release-date }}
+    steps:
+      - name: Validate immutable coordinates
+        env: { RELEASE_TAG: "${{ inputs.tag }}", SOURCE_COMMIT: "${{ inputs.source_commit }}" }
+        run: |
+          [[ $RELEASE_TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          [[ $SOURCE_COMMIT =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: &source
+          repository: drshade/kyyn
+          ref: refs/tags/${{ inputs.tag }}
+          token: ${{ secrets.KYYN_SOURCE_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+      - id: release
+        env: { RELEASE_TAG: "${{ inputs.tag }}", SOURCE_COMMIT: "${{ inputs.source_commit }}" }
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          version=$(bash scripts/release-version.sh "$RELEASE_TAG")
+          date=$(awk -v prefix="## [$version] - " 'index($0, prefix) == 1 { print substr($0, length(prefix) + 1); exit }' CHANGELOG.md)
+          test -n "$date"
+          prerelease=false; [[ $version == *-* ]] && prerelease=true
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "release-date=$date" >> "$GITHUB_OUTPUT"
+
+  build-archives:
+    name: build archive (${{ matrix.target }})
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, runner: macos-14, tar: gtar, musl: false }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-22.04-arm, tar: tar, musl: false }
+          - { target: x86_64-apple-darwin, runner: macos-15-intel, tar: gtar, musl: false }
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-22.04, tar: tar, musl: false }
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-22.04, tar: tar, musl: true }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: *source
+      - name: Verify source commit
+        env: { SOURCE_COMMIT: "${{ inputs.source_commit }}" }
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y git ${{ matrix.musl && 'musl-tools' || '' }}
+      - if: runner.os == 'macOS'
+        run: brew install gnu-tar
+      - run: rustup target add "${{ matrix.target }}"
+      - uses: swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+        with: { key: "release-${{ matrix.target }}" }
+      - name: Build and package
+        env:
+          KYYN_RELEASE_TAR: ${{ matrix.tar }}
+          KYYN_RELEASE_PROFILE: release-artifact
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          cargo build --locked --profile release-artifact --package kyyn --target "${{ matrix.target }}"
+          test "$(target/${{ matrix.target }}/release-artifact/kyyn --version)" = "kyyn $VERSION"
+          bash scripts/package-release-archive.sh "${{ matrix.target }}"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: release-local-${{ matrix.target }}
+          path: |
+            target/distrib/kyyn-${{ matrix.target }}.tar.xz
+            target/distrib/kyyn-${{ matrix.target }}.tar.xz.sha256
+          if-no-files-found: error
+
+  build-global:
+    needs: [metadata, build-archives]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: *source
+      - name: Verify source commit
+        env: { SOURCE_COMMIT: "${{ inputs.source_commit }}" }
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with: { pattern: "release-local-*", path: target/distrib, merge-multiple: true }
+      - name: Render and exercise installers
+        env: { VERSION: "${{ needs.metadata.outputs.version }}" }
+        run: |
+          bash scripts/render-release-installers.sh target/distrib
+          ruby -c target/distrib/kyyn.rb
+          install_dir=$(mktemp -d)
+          KYYN_DOWNLOAD_URL="file://$PWD/target/distrib" KYYN_INSTALL_DIR="$install_dir" sh target/distrib/kyyn-installer.sh
+          test "$("$install_dir/kyyn" --version)" = "kyyn $VERSION"
+      - run: bash scripts/build-deb-packages.sh
+      - run: |
+          mkdir -p target/release-global
+          install -m 0755 target/distrib/kyyn-installer.sh target/release-global/
+          install -m 0644 target/distrib/kyyn.rb target/release-global/
+          install -m 0644 target/package-channels/*.deb target/release-global/
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with: { name: release-global, path: "target/release-global/*", if-no-files-found: error }
+
+  build-container:
+    needs: [metadata, build-archives]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: *source
+      - name: Verify source commit
+        env: { SOURCE_COMMIT: "${{ inputs.source_commit }}" }
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with: { name: release-local-x86_64-unknown-linux-musl, path: target/distrib }
+      - name: Build and smoke-test container and AUR recipe
+        env: { VERSION: "${{ needs.metadata.outputs.version }}", SOURCE_COMMIT: "${{ inputs.source_commit }}" }
+        run: |
+          set -euo pipefail
+          archive=target/distrib/kyyn-x86_64-unknown-linux-musl.tar.xz
+          mkdir -p target/container-context target/package-channels
+          tar -xJf "$archive" -C target/container-context --strip-components=1 kyyn-x86_64-unknown-linux-musl/kyyn
+          docker build --platform linux/amd64 --build-arg "KYYN_VERSION=$VERSION" --build-arg "KYYN_REVISION=$SOURCE_COMMIT" --file packaging/container/Dockerfile --tag "kyyn-release:$VERSION" target/container-context
+          test "$(docker run --rm "kyyn-release:$VERSION" --version)" = "kyyn $VERSION"
+          docker save --output target/package-channels/kyyn-container-amd64.tar "kyyn-release:$VERSION"
+          (cd target/package-channels && sha256sum kyyn-container-amd64.tar > kyyn-container-amd64.tar.sha256)
+          checksum=$(sha256sum "$archive" | cut -d' ' -f1)
+          aur_dir=target/package-channels/aur-proof
+          bash scripts/render-aur-package.sh "$VERSION" "$checksum" "$aur_dir"
+          cp "$archive" "$aur_dir/kyyn-${VERSION}.tar.xz"
+          docker run --rm --user "$(id -u):$(id -g)" --env HOME=/tmp --volume "$PWD:/work" --workdir "/work/$aur_dir" archlinux:base-devel-20260726.0.562117@sha256:40d14ac9db5af04f695eacd82a53181ad685fecc2534a66e05a51182a077cbd5 bash -ceu 'makepkg --nodeps --noconfirm --cleanbuild --clean; package=$(find . -maxdepth 1 -name "kyyn-bin-*.pkg.tar.zst" -print -quit); test -n "$package"; tar -tf "$package" | grep -q "usr/bin/kyyn$"'
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with: { name: release-container, path: "target/package-channels/kyyn-container-amd64.tar*", if-no-files-found: error }
+
+  finalize:
+    needs: [metadata, build-global, build-container]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: *source
+      - name: Verify source commit
+        env: { SOURCE_COMMIT: "${{ inputs.source_commit }}" }
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with: { pattern: "release-*", path: target/release-assets, merge-multiple: true }
+      - run: bash scripts/finalize-release-assets.sh "${{ inputs.source_commit }}" target/release-assets
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with: { name: release-final, path: "target/release-assets/*", if-no-files-found: error }
+
+  publish-release:
+    needs: [metadata, finalize]
+    runs-on: ubuntu-22.04
+    permissions: { contents: write }
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: *source
+      - name: Verify source commit
+        env: { SOURCE_COMMIT: "${{ inputs.source_commit }}" }
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with: { name: release-final, path: target/release-assets }
+      - name: Publish exact artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
+          RELEASE_DATE: ${{ needs.metadata.outputs.release-date }}
+          RELEASE_TARGET: ${{ github.sha }}
+        run: |
+          bash scripts/render-release-notes.sh /tmp/release-notes.md
+          prerelease_flag=(); [[ $PRERELEASE == true ]] && prerelease_flag=(--prerelease)
+          gh release create "v$VERSION" --repo drshade/kyyn-releases --target "$RELEASE_TARGET" "${prerelease_flag[@]}" --title "$VERSION - $RELEASE_DATE" --notes-file /tmp/release-notes.md target/release-assets/*
+
+  publish-homebrew:
+    needs: [metadata, finalize, publish-release]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: { repository: drshade/homebrew-kyyn, token: "${{ secrets.HOMEBREW_TAP_TOKEN }}", persist-credentials: true }
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with: { name: release-final, path: /tmp/kyyn-release-assets }
+      - env: { VERSION: "${{ needs.metadata.outputs.version }}" }
+        run: |
+          install -m 0644 /tmp/kyyn-release-assets/kyyn.rb Formula/kyyn.rb
+          brew style Formula/kyyn.rb
+          git config user.name "kyyn release bot"; git config user.email "noreply@github.com"
+          git add Formula/kyyn.rb
+          if git diff --cached --quiet; then echo "formula already matches $VERSION"; else git commit -m "kyyn $VERSION"; git push; fi
+
+  publish-container:
+    needs: [metadata, finalize, publish-release]
+    runs-on: ubuntu-22.04
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with: { name: release-final, path: target/release-assets }
+      - env: { GHCR_TOKEN: "${{ secrets.GITHUB_TOKEN }}", VERSION: "${{ needs.metadata.outputs.version }}", PRERELEASE: "${{ needs.metadata.outputs.prerelease }}" }
+        run: |
+          image=ghcr.io/drshade/kyyn; local_image="kyyn-release:$VERSION"
+          docker load --input target/release-assets/kyyn-container-amd64.tar
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker tag "$local_image" "$image:$VERSION"; docker push "$image:$VERSION"
+          if [[ $PRERELEASE == false ]]; then major=${VERSION%%.*}; rest=${VERSION#*.}; minor=${rest%%.*}; for alias in "$major.$minor" "$major" latest; do docker tag "$local_image" "$image:$alias"; docker push "$image:$alias"; done; fi
