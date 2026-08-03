@@ -110,6 +110,8 @@ jobs:
         run: |
           bash scripts/render-release-installers.sh target/distrib
           ruby -c target/distrib/kyyn.rb
+          export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+          brew style target/distrib/kyyn.rb
           install_dir=$(mktemp -d)
           KYYN_DOWNLOAD_URL="file://$PWD/target/distrib" KYYN_INSTALL_DIR="$install_dir" sh target/distrib/kyyn-installer.sh
           test "$("$install_dir/kyyn" --version)" = "kyyn $VERSION"
