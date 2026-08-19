@@ -81,10 +81,14 @@ jobs:
         env:
           KYYN_RELEASE_TAR: ${{ matrix.tar }}
           KYYN_RELEASE_PROFILE: release-artifact
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
           VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           cargo build --locked --profile release-artifact --package kyyn --target "${{ matrix.target }}"
-          test "$(target/${{ matrix.target }}/release-artifact/kyyn --version)" = "kyyn $VERSION"
+          bash scripts/verify-release-version.sh \
+            "$(target/${{ matrix.target }}/release-artifact/kyyn --version)" \
+            "$VERSION" \
+            "$SOURCE_COMMIT"
           bash scripts/package-release-archive.sh "${{ matrix.target }}"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
@@ -108,7 +112,7 @@ jobs:
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with: { pattern: "release-local-*", path: target/distrib, merge-multiple: true }
       - name: Render and exercise installers
-        env: { VERSION: "${{ needs.metadata.outputs.version }}" }
+        env: { VERSION: "${{ needs.metadata.outputs.version }}", SOURCE_COMMIT: "${{ inputs.source_commit }}" }
         run: |
           bash scripts/render-release-installers.sh target/distrib
           ruby -c target/distrib/kyyn.rb
@@ -117,7 +121,10 @@ jobs:
           (cd target/homebrew-tap && brew style Formula/kyyn.rb)
           install_dir=$(mktemp -d)
           KYYN_DOWNLOAD_URL="file://$PWD/target/distrib" KYYN_INSTALL_DIR="$install_dir" sh target/distrib/kyyn-installer.sh
-          test "$("$install_dir/kyyn" --version)" = "kyyn $VERSION"
+          bash scripts/verify-release-version.sh \
+            "$("$install_dir/kyyn" --version)" \
+            "$VERSION" \
+            "$SOURCE_COMMIT"
       - run: bash scripts/build-deb-packages.sh
       - run: |
           mkdir -p target/release-global
@@ -146,7 +153,10 @@ jobs:
           mkdir -p target/container-context target/package-channels
           tar -xJf "$archive" -C target/container-context --strip-components=1 kyyn-x86_64-unknown-linux-musl/kyyn
           docker build --platform linux/amd64 --build-arg "KYYN_VERSION=$VERSION" --build-arg "KYYN_REVISION=$SOURCE_COMMIT" --file packaging/container/Dockerfile --tag "kyyn-release:$VERSION" target/container-context
-          test "$(docker run --rm "kyyn-release:$VERSION" --version)" = "kyyn $VERSION"
+          bash scripts/verify-release-version.sh \
+            "$(docker run --rm "kyyn-release:$VERSION" --version)" \
+            "$VERSION" \
+            "$SOURCE_COMMIT"
           docker save --output target/package-channels/kyyn-container-amd64.tar "kyyn-release:$VERSION"
           (cd target/package-channels && sha256sum kyyn-container-amd64.tar > kyyn-container-amd64.tar.sha256)
           checksum=$(sha256sum "$archive" | cut -d' ' -f1)
