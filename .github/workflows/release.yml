@@ -75,7 +75,7 @@ jobs:
       - if: runner.os == 'macOS'
         run: brew install gnu-tar
       - run: rustup target add "${{ matrix.target }}"
-      - uses: swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with: { key: "release-${{ matrix.target }}" }
       - name: Build and package
         env:
